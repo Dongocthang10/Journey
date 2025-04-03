@@ -9,6 +9,9 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
 // Logging tag
 static const char *TAG = "SMART_HOME";
 
@@ -31,6 +34,71 @@ static const char *TAG = "SMART_HOME";
 const int PWM_FREQ = 50;
 const int PWM_RESOLUTION = 16;
 const int PWM_CHANNEL = 0;
+
+const char* ssid = "MAS";
+const char* password = "abc123123";
+
+const char index_html[] PROGMEM = R"rawliteral(
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Smart Home Dashboard</title>
+      <style>
+        body { font-family: Arial; text-align: center; margin: 20px; }
+        .card {
+          border: 1px solid #ddd;
+          border-radius: 10px;
+          padding: 20px;
+          margin: 10px;
+          display: inline-block;
+          width: 200px;
+        }
+      </style>
+    </head>
+    <body>
+      <h1>Smart Home Monitoring</h1>
+      
+      <div class="card">
+        <h2>Temperature</h2>
+        <p id="temperature">--°C</p>
+      </div>
+      
+      <div class="card">
+        <h2>Humidity</h2>
+        <p id="humidity">--%</p>
+      </div>
+      
+      <div class="card">
+        <h2>Servo Angle</h2>
+        <p id="servo">--°</p>
+      </div>
+      
+      <div class="card">
+        <h2>Heater</h2>
+        <p id="heater">OFF</p>
+      </div>
+    
+      <script>
+        function updateData() {
+          fetch('/data')
+            .then(response => response.json())
+            .then(data => {
+              document.getElementById('temperature').innerHTML = data.temperature.toFixed(1) + '°C';
+              document.getElementById('humidity').innerHTML = data.humidity.toFixed(1) + '%';
+              document.getElementById('servo').innerHTML = data.servo_angle.toFixed(0) + '°';
+              document.getElementById('heater').innerHTML = data.heater_status ? 'ON' : 'OFF';
+            });
+        }
+        
+        // Cập nhật dữ liệu mỗi 2 giây
+        setInterval(updateData, 2000);
+        updateData(); // Cập nhật ngay khi tải trang
+      </script>
+    </body>
+    </html>
+    )rawliteral";
+
+WebServer server(80);  
 
 // Sensor data structure
 typedef struct {
@@ -90,6 +158,7 @@ void error_monitor_task(void *pvParameters);
 void watchdog_timer_callback(TimerHandle_t xTimer);
 void periodic_report_callback(TimerHandle_t xTimer);
 
+
 uint32_t angle_to_duty(float angle) {
     // 0° = 0.5ms pulse (1638), 180° = 2.5ms pulse (7864)
     return (uint32_t)(1638 + (angle/180.0)*(7864-1638)); 
@@ -138,6 +207,31 @@ void init_gpio() {
     gpio_config(&io_conf);
 }
 
+void initWiFi() {
+    WiFi.begin(ssid, password);
+    Serial.print("Connecting to WiFi...");
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println("\nConnected! IP Address: " + WiFi.localIP().toString());
+  }
+
+  void handleData() {
+    StaticJsonDocument<200> doc;
+    
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+      doc["temperature"] = system_state.current_temperature;
+      doc["humidity"] = system_state.current_humidity;
+      doc["servo_angle"] = system_state.servo_angle;
+      doc["heater_status"] = system_state.heater_status;
+      xSemaphoreGive(dataMutex);
+    }
+  
+    String json;
+    serializeJson(doc, json);
+    server.send(200, "application/json", json);
+  }
 
 void setup() {
     Serial.begin(9600);
@@ -152,7 +246,7 @@ void setup() {
     dataMutex = xSemaphoreCreateMutex();
     i2cBusSemaphore = xSemaphoreCreateBinary();
     xSemaphoreGive(i2cBusSemaphore);
-  
+    
     // Tạo event group
     systemEventGroup = xEventGroupCreate();
   
@@ -242,9 +336,21 @@ void setup() {
   
     ESP_LOGI(TAG, "Initialization Complete");
     Serial.println("System Ready!");
+
+    initWiFi();
+
+    server.on("/", []() {
+        server.send_P(200, "text/html", index_html);
+      });
+
+    server.on("/data", handleData);
+  
+    server.begin();
+    Serial.println("HTTP server started");
   }
 
 void loop() {
+    server.handleClient();
     static unsigned long last_display = 0;
     if (millis() - last_display > 10000) {
       last_display = millis();
@@ -699,6 +805,9 @@ void display_task(void *pvParameters) {
     }
 }
 
+
+
+
 // Error monitor task - handles system errors
 void error_monitor_task(void *pvParameters) {
     EventBits_t event_bits;
@@ -836,3 +945,4 @@ void periodic_report_callback(TimerHandle_t xTimer) {
              uxQueueMessagesWaiting(commandQueue),
              uxQueueSpacesAvailable(commandQueue));
 }
+
