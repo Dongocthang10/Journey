@@ -526,17 +526,18 @@ void data_processing_task(void *pvParameters) {
                     ESP_LOGI(TAG, "Processed temperature: %.1f°C (Avg: %.1f°C)", 
                              received_data.value, temp_avg);
                     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    // Ánh xạ nhiệt độ 18-30°C -> góc servo 0-180°
-                    float servo_angle = map_value(system_state.current_temperature, 
-                                                18.0, 30.0, 
-                                                0.0, 180.0);
+                    system_state.current_temperature = temp_avg; 
+                    system_state.current_humidity = humi_avg;     
+            
+            
+                    float servo_angle = map_value(temp_avg, 18.0, 30.0, 0.0, 180.0); 
+                    servo_angle = constrain(servo_angle, 0.0, 180.0);
                     
-                    // Tạo và gửi lệnh servo
                     system_command_t servo_cmd;
                     servo_cmd.type = CMD_SERVO_ANGLE;
-                    servo_cmd.value = constrain(servo_angle, 0.0, 180.0);
+                    servo_cmd.value = servo_angle;
                     xQueueSend(commandQueue, &servo_cmd, 0);
-                    
+            
                     xSemaphoreGive(dataMutex);
                 }
                     
@@ -589,6 +590,21 @@ void data_processing_task(void *pvParameters) {
                 default:
                     ESP_LOGW(TAG, "Unknown sensor ID: %d", received_data.sensor_id);
                     break;
+            }
+            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                // Sử dụng temp_avg và humi_avg đã tính
+                bool need_heater_on = (temp_avg < 22.0) && (humi_avg < 40.0);
+                bool need_heater_off = (temp_avg > 24.0) || (humi_avg > 50.0);
+            
+                if (need_heater_on && !system_state.heater_status) {
+                    system_command_t cmd = {CMD_HEATER_ON, 0};
+                    xQueueSend(commandQueue, &cmd, 0);
+                }
+                else if (need_heater_off && system_state.heater_status) {
+                    system_command_t cmd = {CMD_HEATER_OFF, 0};
+                    xQueueSend(commandQueue, &cmd, 0);
+                }
+                xSemaphoreGive(dataMutex);
             }
 
             if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -668,16 +684,14 @@ void control_task(void *pvParameters) {
                         
                     case CMD_HEATER_ON:
                         Serial.println("[CTRL] Turning heater ON");
-                        system_state.heater_status = true;
                         gpio_set_level(HEATER_CONTROL_PIN, 1);
-                        ESP_LOGI(TAG, "Heater turned ON");
+                        system_state.heater_status = true;
                         break;
                         
                     case CMD_HEATER_OFF:
                         Serial.println("[CTRL] Turning heater OFF");
-                        system_state.heater_status = false;
                         gpio_set_level(HEATER_CONTROL_PIN, 0);
-                        ESP_LOGI(TAG, "Heater turned OFF");
+                        system_state.heater_status = false;
                         break;
                         
                     case CMD_ALARM_ON:
